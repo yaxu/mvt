@@ -1,4 +1,5 @@
 {-# LANGUAGE DeriveFunctor #-}
+{-# LANGUAGE RankNTypes    #-}
 
 -- Minimal Viable Tidal
 
@@ -544,5 +545,10 @@ pairAligned In (x, Cat ys) = loop 0 x ys
           where t' = t + duration b
                 (a', a'') = seqSplitAt t' a
 
-
 pairAligned Out (a, b) = swap <$> pairAligned In (b, a)
+
+pairAlign :: Strategy -> Direction -> Sequence a -> Sequence b -> Sequence (a, b)
+pairAlign s d a b = pairAligned d $ align s a b
+
+alignF :: Strategy -> Direction -> (a -> b -> c) -> Sequence a -> Sequence b -> Sequence c
+alignF s d f a b = uncurry f <$> pairAlign s d a b
