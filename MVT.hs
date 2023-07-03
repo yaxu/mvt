@@ -4,24 +4,29 @@
 
 module MVT where
 
-import           Control.Applicative
+import           Control.Applicative (liftA2)
 import           Data.Maybe          (fromMaybe)
+-- So we can overload *> and <* as alternatives to <*>
+import           Data.List           (intercalate)
+import           Data.Ratio
+import           Prelude             hiding ((*>), (<*))
+
 -- ********
 -- | Time *
 -- ********
 type Time = Rational
 
 sam :: Time -> Time
-sam s = (toRational :: Int -> Time) $ floor s
+sam s = toRational (floor s :: Int)
 
 -- | The start of the next cycle
 nextSam :: Time -> Time
-nextSam s = sam s + 1
+nextSam = (+1) . sam
 
 -- ***********************
 -- | Arc (aka time span) *
 -- ***********************
-data Arc = Arc { aBegin :: Time, aEnd   :: Time}
+data Arc = Arc { aBegin :: Time, aEnd :: Time}
   deriving (Eq, Ord, Show)
 
 -- | Intersection of two arcs
@@ -67,40 +72,61 @@ instance (Show a) => Show (Event a) where
 
 class (Functor p, Applicative p, Monad p) => Pattern p where
   duration :: p a -> Time
-  manipTime :: (Time -> Time) -> (Time -> Time) -> p a -> p a
+  withTime :: (Time -> Time) -> (Time -> Time) -> p a -> p a
   innerBind, outerBind :: p a -> (a -> p b) -> p b
   cat :: [p a] -> p a
+  timeCat :: [(Time, p a)] -> p a
   stack :: [p a] -> p a
   toSignal :: p a -> Signal a
-  timeCat :: [(Time, p a)] -> p a
 
 silence :: (Monoid (p a), Pattern p) => p a
 silence = mempty
+
+innerJoin, outerJoin :: Pattern p => p (p b) -> p b
+innerJoin s = innerBind s id
+outerJoin s = outerBind s id
+
+-- Patternification
+
+-- patternify the first parameter
+patternify :: Pattern p => (a -> b -> p c) -> (p a -> b -> p c)
+patternify f apat pat                 = innerJoin $ (`f` pat) <$> apat
+
+-- patternify the first two parameters
+patternify_p_p :: (Pattern p) => (a -> b -> c -> p d) -> (p a -> p b -> c -> p d)
+patternify_p_p f apat bpat pat        = innerJoin $ (\a b -> f a b pat) <$> apat <* bpat
+
+-- -- patternify the first but not the second parameters
+-- patternify_p_n :: Pattern p => (a -> b -> c -> p d) -> (p a -> b -> c -> p d)
+-- patternify_p_n f apat b pat           = innerJoin $ (\a -> f a b pat) <$> apat
+
+-- -- patternify the first three parameters
+-- patternify_p_p_p :: Pattern p => (a -> b -> c -> d -> p e) -> (p a -> p b -> p c -> d -> p e)
+-- patternify_p_p_p f apat bpat cpat pat = innerJoin $ (\a b c -> f a b c pat) <$> apat <* bpat <* cpat
 
 -- **********
 -- | Signal *
 -- **********
 -- A pattern that's a function from a timespan to events active during
--- that timespan
+-- that timespan. A continuous signal, that can nonetheless contain
+-- discrete events.
 data Signal a = Signal {query :: Arc -> [Event a]}
   deriving (Functor)
 
-instance Semigroup (Signal a) where
-  a <> b = cat [a,b]
-
-instance Monoid (Signal a) where
-  mempty = Signal $ const []
-
-instance Monad Signal where
-  (>>=) = sigBind $ liftA2 sect
-
+instance Semigroup (Signal a) where a <> b = cat [a,b]
+instance Monoid (Signal a)    where mempty = Signal $ const []
+instance Monad Signal         where (>>=) = sigBind $ liftA2 sect
+                                    return = pure
+-- Define applicative from monad
 instance Applicative Signal where
-  pure = return
+  pure v = Signal $ \q -> map (\arc -> Event (Just $ timeToCycle $ aBegin arc) arc v) $ splitArcs q
   pf <*> px = pf >>= \f -> px >>= \x -> pure $ f x
 
 instance Pattern Signal where
+  -- We always work with signals as if they have a duration of 1
+  -- cycle, even though successive cycles very often differ
   duration _ = 1
-  manipTime fa fb pat = withEventTime fa $ withQueryTime fb pat
+  withTime fa fb pat = withEventTime fa $ withQueryTime fb pat
   -- | Alternative binds
   innerBind = sigBind $ flip const
   outerBind = sigBind const
@@ -125,12 +151,19 @@ splitQueries pat = Signal $ concatMap (query pat) . splitArcs
 (<*), (*>) :: Pattern p => p (t -> b) -> p t -> p b
 pf <* px = pf `innerBind` \f -> px `innerBind` \x -> pure $ f x
 pf *> px = pf `outerBind` \f -> px `outerBind` \x -> pure $ f x
+infixl 4 <*, *>
 
 _early, _late, _fast, _slow :: Pattern p => Time -> p a -> p a
-_early t = manipTime (subtract t) (+ t)
-_late t = manipTime (+ t) (subtract t)
-_fast t = manipTime (* t) (/ t)
-_slow t = manipTime (/ t) (* t)
+_early t = withTime (subtract t) (+ t)
+_late t = withTime (+ t) (subtract t)
+_fast t = withTime (* t) (/ t)
+_slow t = withTime (/ t) (* t)
+
+early, late, fast, slow :: Pattern p => p Time -> p a -> p a
+early = patternify _early
+late = patternify _late
+fast = patternify _fast
+slow = patternify _slow
 
 withArcTime :: (Time -> Time) -> Arc -> Arc
 withArcTime timef (Arc b e) = Arc (timef b) (timef e)
@@ -172,10 +205,6 @@ sigBind chooseWhole pv f = Signal $ \q -> concatMap match $ query pv q
 _zoomArc :: Arc -> Signal a -> Signal a
 _zoomArc (Arc s e) p = splitQueries $ withEventArc (mapCycle ((/d) . subtract s)) $ withQuery (mapCycle ((+s) . (*d))) p
      where d = e-s
-
--- -- | Repeat discrete value once per cycle
--- sigAtom :: a -> Signal a
--- sigAtom v = Signal $ \q -> map (\arc -> Event (Just $ timeToCycle $ aBegin arc) arc v) $ splitArcs q
 
 _fastGap :: Time -> Signal a -> Signal a
 _fastGap factor pat = splitQueries $ withEvent ef $ withQueryMaybe qf pat
@@ -229,18 +258,56 @@ data Sequence a = Atom {atomDuration :: Time,
                 | Stack [Sequence a]
                 deriving (Eq, Ord)
 
+prettyRatio :: Rational -> String
+prettyRatio r | denominator r == 1 = show $ numerator r
+              | otherwise = show (numerator r) ++ "/" ++ show (denominator r)
+
+instance (Show a) => Show (Sequence a) where
+  show (Atom d _ _ Nothing) = "~" ++ "×" ++ prettyRatio d
+  show (Atom d i o (Just v)) = show v ++ "×" ++ prettyRatio d ++ showio
+    where showio | i == 0 && o == 0 = ""
+                 | otherwise = "(" ++ prettyRatio i ++ "," ++ prettyRatio o ++ ")"
+  show (Cat xs) = "[" ++ unwords (map show xs) ++ "]"
+  show (Stack xs) = "[" ++ intercalate ", " (map show xs) ++ "]"
+
+
 gap :: Time -> Sequence a
 gap t = Atom t 0 0 Nothing
 
 step :: Time -> a -> Sequence a
 step t v = Atom t 0 0 $ Just v
 
+seqJoinWith :: (Time -> Sequence a -> Sequence a) -> Sequence (Sequence a) -> Sequence a
+seqJoinWith f (Atom d i o (Just seq)) = f (d + i + o) seq
+seqJoinWith _ (Atom d i o Nothing)    = Atom d i o Nothing
+seqJoinWith f (Cat xs)                = Cat $ map (seqJoinWith f) xs
+seqJoinWith f (Stack xs)              = Stack $ map (seqJoinWith f) xs
+
 -- Flatten, using outer duration as relative duration for inner
 seqJoin :: Sequence (Sequence a) -> Sequence a
-seqJoin (Atom d i o (Just seq)) =  _slow (d + i + o) seq
-seqJoin (Atom d i o Nothing)    = Atom d i o Nothing
-seqJoin (Cat xs)                = Cat $ map seqJoin xs
-seqJoin (Stack xs)              = Stack $ map seqJoin xs
+seqJoin = seqJoinWith _slow
+
+-- Flatten, expanding inner to outer duration
+seqOuterJoin :: Sequence (Sequence a) -> Sequence a
+seqOuterJoin = seqJoinWith (\t seq -> _fast (duration seq / t) seq)
+
+-- Flatten, repeating inner to total duration of outer
+seqInnerJoin :: Sequence (Sequence a) -> Sequence a
+seqInnerJoin = seqJoinWith seqTakeLoop
+
+seqTakeLoop :: Time -> Sequence a -> Sequence a
+seqTakeLoop 0 _ = gap 0
+seqTakeLoop t pat@(Atom d i _ v) | t > d = seqTakeLoop t $ Cat $ repeat pat
+                                 | otherwise = Atom t i (max 0 $ d - t) v
+seqTakeLoop t (Stack ss) = Stack $ map (seqTakeLoop t) ss
+-- TODO - raise an error?
+seqTakeLoop t (Cat []) = Cat []
+seqTakeLoop t (Cat ss) = Cat $ loop t $ cycle ss
+  where loop :: Time -> [Sequence a] -> [Sequence a]
+        loop t' (s:ss') | t' <= 0 = []
+                        | t' <= stepDur = [seqTakeLoop t' s]
+                        | otherwise = seqTakeLoop stepDur s : loop (t' - stepDur) ss'
+          where stepDur = duration s
 
 withAtom :: (Sequence a -> Sequence a) -> Sequence a -> Sequence a
 withAtom f a@Atom {}  = f a
@@ -257,15 +324,15 @@ instance Monoid (Sequence a) where
   mempty = gap 1
 
 instance Monad Sequence where
-  return = step 1
+  return = pure
   seqv >>= f = seqJoin $ fmap f seqv
 
 instance Applicative Sequence where
-  pure = return
+  pure = step 1
   pf <*> px = pf >>= \f -> px >>= \x -> pure $ f x
 
 instance Pattern Sequence where
-  manipTime f _ pat = withAtomTime f pat
+  withTime f _ pat = withAtomTime f pat
   cat = Cat   -- TODO - shallow cat?
   stack = Stack
   duration (Atom d _ _ _) = d
@@ -273,8 +340,8 @@ instance Pattern Sequence where
   duration (Stack [])     = 0
   duration (Stack (x:_))  = duration x
   timeCat seqs = seqJoin $ Cat $ map (uncurry step) seqs
-  -- innerBind =
-  -- outerBind =
+  seqv `outerBind` f = seqOuterJoin $ fmap f seqv
+  seqv `innerBind` f = seqInnerJoin $ fmap f seqv
   -- One beat per cycle..
   toSignal pat = _slow (duration pat) $ toSignal' pat
     where
