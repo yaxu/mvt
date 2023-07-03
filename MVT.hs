@@ -69,11 +69,11 @@ instance (Show a) => Show (Event a) where
 -- | Pattern *
 -- ***********
 -- A type class for patterns
-
 class (Functor p, Applicative p, Monad p) => Pattern p where
   duration :: p a -> Time
   withTime :: (Time -> Time) -> (Time -> Time) -> p a -> p a
   innerBind, outerBind :: p a -> (a -> p b) -> p b
+  bindParameter :: p a -> (a -> p b) -> p b
   cat :: [p a] -> p a
   timeCat :: [(Time, p a)] -> p a
   stack :: [p a] -> p a
@@ -89,20 +89,20 @@ outerJoin s = outerBind s id
 -- Patternification
 
 -- patternify the first parameter
-patternify :: Pattern p => (a -> b -> p c) -> (p a -> b -> p c)
-patternify f apat pat                 = innerJoin $ (`f` pat) <$> apat
+patternify :: Pattern p => (a -> b -> p c) -> p a -> b -> p c
+patternify f apat pat                 = apat `bindParameter` \a -> f a pat
 
 -- patternify the first two parameters
-patternify_p_p :: (Pattern p) => (a -> b -> c -> p d) -> (p a -> p b -> c -> p d)
-patternify_p_p f apat bpat pat        = innerJoin $ (\a b -> f a b pat) <$> apat <* bpat
+patternify_p_p :: (Pattern p) => (a -> b -> c -> p d) -> p a -> p b -> c -> p d
+patternify_p_p f apat bpat pat        = apat `bindParameter` \a -> (bpat `bindParameter` \b -> f a b pat)
 
--- -- patternify the first but not the second parameters
--- patternify_p_n :: Pattern p => (a -> b -> c -> p d) -> (p a -> b -> c -> p d)
--- patternify_p_n f apat b pat           = innerJoin $ (\a -> f a b pat) <$> apat
+-- patternify the first but not the second parameters
+patternify_p_n :: Pattern p => (a -> b -> c -> p d) -> p a -> b -> c -> p d
+patternify_p_n f apat b pat           = apat `bindParameter` \a -> f a b pat
 
--- -- patternify the first three parameters
--- patternify_p_p_p :: Pattern p => (a -> b -> c -> d -> p e) -> (p a -> p b -> p c -> d -> p e)
--- patternify_p_p_p f apat bpat cpat pat = innerJoin $ (\a b c -> f a b c pat) <$> apat <* bpat <* cpat
+-- patternify the first three parameters
+patternify_p_p_p :: Pattern p => (a -> b -> c -> d -> p e) -> p a -> p b -> p c -> d -> p e
+patternify_p_p_p f apat bpat cpat pat = apat `bindParameter` \a -> (bpat `bindParameter` \b -> (cpat `bindParameter` \c -> f a b c pat))
 
 -- **********
 -- | Signal *
@@ -130,6 +130,7 @@ instance Pattern Signal where
   -- | Alternative binds
   innerBind = sigBind $ flip const
   outerBind = sigBind const
+  bindParameter = innerBind
   -- | Concatenate a list of signals, interleaving cycles.
   cat pats = splitQueries $ Signal $ \a -> query (_late (offset a) (pats !! mod (floor $ aBegin a) n)) a
     where offset arc = sam (aBegin arc) - sam (aBegin arc / toRational n)
@@ -153,11 +154,12 @@ pf <* px = pf `innerBind` \f -> px `innerBind` \x -> pure $ f x
 pf *> px = pf `outerBind` \f -> px `outerBind` \x -> pure $ f x
 infixl 4 <*, *>
 
+-- TODO - early/late don't work for sequences - define on instances
 _early, _late, _fast, _slow :: Pattern p => Time -> p a -> p a
 _early t = withTime (subtract t) (+ t)
 _late t = withTime (+ t) (subtract t)
-_fast t = withTime (* t) (/ t)
-_slow t = withTime (/ t) (* t)
+_fast t = withTime (/ t) (* t)
+_slow t = withTime (* t) (/ t)
 
 early, late, fast, slow :: Pattern p => p Time -> p a -> p a
 early = patternify _early
@@ -342,6 +344,7 @@ instance Pattern Sequence where
   timeCat seqs = seqJoin $ Cat $ map (uncurry step) seqs
   seqv `outerBind` f = seqOuterJoin $ fmap f seqv
   seqv `innerBind` f = seqInnerJoin $ fmap f seqv
+  bindParameter = (>>=)
   -- One beat per cycle..
   toSignal pat = _slow (duration pat) $ toSignal' pat
     where
