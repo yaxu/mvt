@@ -88,6 +88,8 @@ outerJoin s = outerBind s id
 
 -- Patternification
 
+-- Turns functions with non-patterned parameters into fully patternified ones
+
 -- patternify the first parameter
 patternify :: Pattern p => (a -> b -> p c) -> p a -> b -> p c
 patternify f apat pat                 = apat `bindParameter` \a -> f a pat
@@ -115,7 +117,7 @@ data Signal a = Signal {query :: Arc -> [Event a]}
 
 instance Semigroup (Signal a) where a <> b = cat [a,b]
 instance Monoid (Signal a)    where mempty = Signal $ const []
-instance Monad Signal         where (>>=) = sigBind $ liftA2 sect
+instance Monad Signal         where (>>=) = sigBindWith $ liftA2 sect
                                     return = pure
 -- Define applicative from monad
 instance Applicative Signal where
@@ -128,8 +130,8 @@ instance Pattern Signal where
   duration _ = 1
   withTime fa fb pat = withEventTime fa $ withQueryTime fb pat
   -- | Alternative binds
-  innerBind = sigBind $ flip const
-  outerBind = sigBind const
+  innerBind = sigBindWith $ flip const
+  outerBind = sigBindWith const
   bindParameter = innerBind
   -- | Concatenate a list of signals, interleaving cycles.
   cat pats = splitQueries $ Signal $ \a -> query (_late (offset a) (pats !! mod (floor $ aBegin a) n)) a
@@ -199,8 +201,9 @@ withQueryMaybe qf pat = Signal $ \q -> fromMaybe [] $ qf q >>= Just . query pat
 withQueryTime :: (Time -> Time) -> Signal a -> Signal a
 withQueryTime timef = withQuery $ withArcTime timef
 
-sigBind :: (Maybe Arc -> Maybe Arc -> Maybe Arc) -> Signal a -> (a -> Signal b) -> Signal b
-sigBind chooseWhole pv f = Signal $ \q -> concatMap match $ query pv q
+-- Makes a signal bind, given a function of how to calculate the 'whole' timespan
+sigBindWith :: (Maybe Arc -> Maybe Arc -> Maybe Arc) -> Signal a -> (a -> Signal b) -> Signal b
+sigBindWith chooseWhole pv f = Signal $ \q -> concatMap match $ query pv q
   where match event = map (withWhole event) $ query (f $ value event) (active event)
         withWhole event event' = event' {whole = chooseWhole (whole event) (whole event')}
 
@@ -208,6 +211,7 @@ _zoomArc :: Arc -> Signal a -> Signal a
 _zoomArc (Arc s e) p = splitQueries $ withEventArc (mapCycle ((/d) . subtract s)) $ withQuery (mapCycle ((+s) . (*d))) p
      where d = e-s
 
+-- TODO - why is this function so long?
 _fastGap :: Time -> Signal a -> Signal a
 _fastGap factor pat = splitQueries $ withEvent ef $ withQueryMaybe qf pat
   -- A bit fiddly, to drop zero-width queries at the start of the next cycle
@@ -245,7 +249,8 @@ sigTimeCat tps = stack $ map (\(s,e,p) -> _compressArc (Arc (s/total) (e/total))
 -- ************
 -- | Sequence *
 -- ************
-
+-- A pattern as a discrete, contiguous, finite sequence, that's
+-- structured to support polyphonic stacks, and embedded subsequences
 instance Functor Sequence where
   fmap f (Atom d i o v) = Atom d i o (f <$> v)
   fmap f (Cat xs)       = Cat $ map (fmap f) xs
@@ -271,7 +276,6 @@ instance (Show a) => Show (Sequence a) where
                  | otherwise = "(" ++ prettyRatio i ++ "," ++ prettyRatio o ++ ")"
   show (Cat xs) = "[" ++ unwords (map show xs) ++ "]"
   show (Stack xs) = "[" ++ intercalate ", " (map show xs) ++ "]"
-
 
 gap :: Time -> Sequence a
 gap t = Atom t 0 0 Nothing
