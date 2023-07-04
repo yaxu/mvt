@@ -40,7 +40,7 @@ data Arc = Arc { aBegin :: Time, aEnd :: Time}
 
 -- | Intersection of two arcs
 sect :: Arc -> Arc -> Arc
-sect (Arc b e) (Arc bPrime ePrime) = Arc (max b bPrime) (min e ePrime)
+sect (Arc b e) (Arc b' e') = Arc (max b b') (min e e')
 
 -- | Returns the whole cycle arc that the given time is in
 timeToCycle :: Time -> Arc
@@ -49,17 +49,17 @@ timeToCycle t = Arc (sam t) (nextSam t)
 -- | Splits a timespan at cycle boundaries
 splitArcs :: Arc -> [Arc]
 splitArcs (Arc s e) | s == e = [Arc s e] -- support zero-width arcs
-                    | otherwise = splitArcsPrime (Arc s e) -- otherwise, recurse
-  where splitArcsPrime (Arc sPrime ePrime) | ePrime <= sPrime = []
-                               | sam sPrime == sam ePrime = [Arc sPrime ePrime]
+                    | otherwise = splitArcs' (Arc s e) -- otherwise, recurse
+  where splitArcs' (Arc s' e') | e' <= s' = []
+                               | sam s' == sam e' = [Arc s' e']
                                | otherwise
-          = Arc sPrime (nextSam sPrime) : splitArcsPrime (Arc (nextSam sPrime) ePrime)
+          = Arc s' (nextSam s') : splitArcs' (Arc (nextSam s') e')
 
 -- | Similar to 'fmap' but time is relative to the cycle (i.e. the
 -- sam of the start of the arc)
 mapCycle :: (Time -> Time) -> Arc -> Arc
-mapCycle f (Arc s e) = Arc (samPrime + f (s - samPrime)) (samPrime + f (e - samPrime))
-         where samPrime = sam s
+mapCycle f (Arc s e) = Arc (sam' + f (s - sam')) (sam' + f (e - sam'))
+         where sam' = sam s
 
 -- *********
 -- | Event *
@@ -150,7 +150,7 @@ instance Pattern Signal where
     where total = sum $ map fst tps
           arrange :: Time -> [(Time, Signal a)] -> [(Time, Time, Signal a)]
           arrange _ []            = []
-          arrange t ((tPrime,p):tpsPrime) = (t,t+tPrime,p) : arrange (t+tPrime) tpsPrime
+          arrange t ((t',p):tps') = (t,t+t',p) : arrange (t+t') tps'
   stack pats = Signal $ \a -> concatMap (`query` a) pats
   toSignal = id
 
@@ -214,7 +214,7 @@ withQueryTime timef = withQuery $ withArcTime timef
 sigBindWith :: (Maybe Arc -> Maybe Arc -> Maybe Arc) -> Signal a -> (a -> Signal b) -> Signal b
 sigBindWith chooseWhole pv f = Signal $ \q -> concatMap match $ query pv q
   where match event = map (withWhole event) $ query (f $ value event) (active event)
-        withWhole event eventPrime = eventPrime {whole = chooseWhole (whole event) (whole eventPrime)}
+        withWhole event event' = event' {whole = chooseWhole (whole event) (whole event')}
 
 _zoomArc :: Arc -> Signal a -> Signal a
 _zoomArc (Arc s e) p = splitQueries $ withEventArc (mapCycle ((/d) . subtract s)) $ withQuery (mapCycle ((+s) . (*d))) p
@@ -230,18 +230,18 @@ _fastGap factor pat = splitQueries $ withEvent ef $ withQueryMaybe qf pat
                 bpos = min 1 $ (b - cyc) * factor
                 epos = min 1 $ (e - cyc) * factor
         -- Also fiddly, to maintain the right 'whole' relative to the part
-        ef ev = ev {whole = wPrime, active = aPrime}
+        ef ev = ev {whole = w', active = a'}
           where a = active ev
                 b = aBegin a
                 e = aEnd a
-                aPrime = Arc (cyc + bpos) (cyc + epos)
+                a' = Arc (cyc + bpos) (cyc + epos)
                   where cyc = sam b
                         bpos = min 1 $ (b - cyc) / factor
                         epos = min 1 $ (e - cyc) / factor
-                wPrime = do w <- whole ev
-                            let bPrime = aBegin aPrime - ((b - aBegin w) / factor)
-                                ePrime = aEnd aPrime + ((aEnd w - e) / factor)
-                            return $ Arc bPrime ePrime
+                w' = do w <- whole ev
+                        let b' = aBegin a' - ((b - aBegin w) / factor)
+                            e' = aEnd a' + ((aEnd w - e) / factor)
+                        return $ Arc b' e'
 
 _compressArc :: Arc -> Signal a -> Signal a
 _compressArc (Arc b e) pat | b > e || b > 1 || e > 1 || b < 0 || e < 0 = silence
@@ -253,7 +253,7 @@ sigTimeCat tps = stack $ map (\(s,e,p) -> _compressArc (Arc (s/total) (e/total))
     where total = sum $ map fst tps
           arrange :: Time -> [(Time, Signal a)] -> [(Time, Time, Signal a)]
           arrange _ []            = []
-          arrange t ((tPrime,p):tpsPrime) = (t,t+tPrime,p) : arrange (t+tPrime) tpsPrime
+          arrange t ((t',p):tps') = (t,t+t',p) : arrange (t+t') tps'
 
 -- ************
 -- | Sequence *
@@ -292,6 +292,28 @@ gap t = Atom t 0 0 Nothing
 step :: Time -> a -> Sequence a
 step t v = Atom t 0 0 $ Just v
 
+-- | Removes duplication, zero-width steps etc.
+-- TODO - do we really want to use this internally? E.g. a stack of
+-- stacks might represent structure rather than being redundant.
+normalise :: Sequence a -> Sequence a
+normalise (Cat [x]) = normalise x
+normalise (Cat xs) = listToCat $ loop $ map normalise xs
+  where listToCat [x] = x
+        listToCat xs' = Cat xs'
+        loop []                   = []
+        loop (Atom 0 _ _ _:xs') = loop xs'
+        loop (Atom t _ _ Nothing:Atom t' _ _ Nothing:xs') = loop $ gap (t + t'):xs'
+        loop (Cat xs':xs'')       = loop $ xs' ++ xs''
+        loop (x:xs')              = normalise x:loop xs'
+normalise (Stack [x]) = normalise x
+normalise (Stack xs) = listToStack $ loop xs
+  where listToStack [x] = x
+        listToStack xs' = Stack xs'
+        loop (Stack xs':xs'') = loop $ xs' ++ xs''
+        loop (x:xs')          = normalise x:loop xs'
+        loop []               = []
+normalise x = x
+
 seqJoinWith :: (Time -> Sequence a -> Sequence a) -> Sequence (Sequence a) -> Sequence a
 seqJoinWith f (Atom d i o (Just seq)) = f (d + i + o) seq
 seqJoinWith _ (Atom d i o Nothing)    = Atom d i o Nothing
@@ -319,9 +341,9 @@ seqTakeLoop t (Stack ss) = Stack $ map (seqTakeLoop t) ss
 seqTakeLoop t (Cat []) = Cat []
 seqTakeLoop t (Cat ss) = Cat $ loop t $ cycle ss
   where loop :: Time -> [Sequence a] -> [Sequence a]
-        loop tPrime (s:ssPrime) | tPrime <= 0 = []
-                        | tPrime <= stepDur = [seqTakeLoop tPrime s]
-                        | otherwise = seqTakeLoop stepDur s : loop (tPrime - stepDur) ssPrime
+        loop t' (s:ss') | t' <= 0 = []
+                        | t' <= stepDur = [seqTakeLoop t' s]
+                        | otherwise = seqTakeLoop stepDur s : loop (t' - stepDur) ss'
           where stepDur = duration s
 
 seqDrop :: Time -> Sequence a -> Sequence a
@@ -369,7 +391,7 @@ instance Applicative Sequence where
 instance Pattern Sequence where
   withTime f _ pat = withAtomTime f pat
   cat = Cat   -- TODO - shallow cat?
-  stack = Stack
+  stack = expands
   duration (Atom d _ _ _) = d
   duration (Cat xs)       = sum $ map duration xs
   duration (Stack [])     = 0
@@ -379,16 +401,16 @@ instance Pattern Sequence where
   seqv `innerBind` f = seqInnerJoin $ fmap f seqv
   bindParameter = (>>=)
   -- One beat per cycle..
-  toSignal pat = _slow (duration pat) $ toSignalPrime pat
+  toSignal pat = _slow (duration pat) $ toSignal' pat
     where
       -- One sequence per cycle
-      toSignalPrime (Atom d i o (Just v)) | d == 0 = error "whoops"
+      toSignal' (Atom d i o (Just v)) | d == 0 = error "whoops"
                                           | otherwise = _zoomArc (Arc (i/t) (1-(o/t))) $ pure v
         where t = d + i + o
-      toSignalPrime (Atom _ _ _ Nothing) = silence
-      toSignalPrime (Cat xs) = timeCat timeseqs
-        where timeseqs = map (\x -> (duration x, toSignalPrime x)) xs
-      toSignalPrime (Stack xs) = stack $ map toSignalPrime xs
+      toSignal' (Atom _ _ _ Nothing) = silence
+      toSignal' (Cat xs) = timeCat timeseqs
+        where timeseqs = map (\x -> (duration x, toSignal' x)) xs
+      toSignal' (Stack xs) = stack $ map toSignal' xs
 
 -- **********************
 -- | Sequence alignment *
@@ -495,8 +517,8 @@ align strategy _ _ = error $ show strategy ++ " not implemented for sequences."
 -- **********************
 
 -- | Once we've aligned two patterns, where does the structure come from?
-data Direction = In
-               | Out
+data Direction = Inner
+               | Outer
                | Mix
                deriving (Eq, Ord, Show)
 
@@ -509,20 +531,21 @@ pairAligned direction (Stack as, b) = Stack $ map (\a -> pairAligned direction (
 pairAligned direction (a, Stack bs) = Stack $ map (\b -> pairAligned direction (a, b)) bs
 
 -- TODO - should the value be Nothing if one/both are nothings?
-pairAligned In (Atom d i o v, Atom _ _ _ v') = Atom d i o $ do a <- v
-                                                               b <- v'
-                                                               return (a,b)
+pairAligned Inner (Atom d i o v, Atom _ _ _ v')
+  = Atom d i o $ do a <- v
+                    b <- v'
+                    return (a,b)
 
-pairAligned In (Cat xs, Cat ys) = Cat $ loop xs ys
+pairAligned Inner (Cat xs, Cat ys) = Cat $ loop xs ys
   where loop :: [Sequence a] -> [Sequence b] -> [Sequence (a, b)]
         loop [] _ = []
         loop _ [] = []
         loop (a:as) (b:bs) = case cmp of
-                               LT -> pairAligned In (a, b')
+                               LT -> pairAligned Inner (a, b')
                                      : loop as (b'':bs)
-                               GT -> pairAligned In (a', b)
+                               GT -> pairAligned Inner (a', b)
                                      : loop (a'':as) bs
-                               EQ -> pairAligned In (a, b)
+                               EQ -> pairAligned Inner (a, b)
                                      : loop as bs
           where adur = duration a
                 bdur = duration b
@@ -530,25 +553,52 @@ pairAligned In (Cat xs, Cat ys) = Cat $ loop xs ys
                 (a', a'') = seqSplitAt bdur a
                 (b', b'') = seqSplitAt adur b
 
-pairAligned In (Cat xs, y) = loop 0 xs y
+pairAligned Inner (Cat xs, y) = loop 0 xs y
   where loop _ [] _     = gap 0
-        loop _ [a] b    = pairAligned In (a, b)
-        loop t (a:as) b = cat [pairAligned In (a, b'), loop t' as b'']
+        loop _ [a] b    = pairAligned Inner (a, b)
+        loop t (a:as) b = cat [pairAligned Inner (a, b'), loop t' as b'']
           where t' = t + duration a
                 (b', b'') = seqSplitAt t' b
 
-pairAligned In (x, Cat ys) = loop 0 x ys
+pairAligned Inner (x, Cat ys) = loop 0 x ys
   where loop :: Time -> Sequence a -> [Sequence b] -> Sequence (a,b)
         loop _ _ []     = gap 0
-        loop _ a [b]    = pairAligned In (a, b)
-        loop t a (b:bs) = cat [pairAligned In (a', b), loop t' a'' bs]
+        loop _ a [b]    = pairAligned Inner (a, b)
+        loop t a (b:bs) = cat [pairAligned Inner (a', b), loop t' a'' bs]
           where t' = t + duration b
                 (a', a'') = seqSplitAt t' a
 
-pairAligned Out (a, b) = swap <$> pairAligned In (b, a)
+pairAligned Outer (a, b) = swap <$> pairAligned Inner (b, a)
 
 pairAlign :: Strategy -> Direction -> Sequence a -> Sequence b -> Sequence (a, b)
 pairAlign s d a b = pairAligned d $ align s a b
 
 alignF :: Strategy -> Direction -> (a -> b -> c) -> Sequence a -> Sequence b -> Sequence c
 alignF s d f a b = uncurry f <$> pairAlign s d a b
+
+-- | Stacks
+
+alignStack :: Strategy -> [Sequence a] -> Sequence a
+alignStack strat xs = normalise $ loop xs
+  where loop []      = silence
+        loop [x]     = x
+        loop (x:xs') = Stack [a,b]
+          where (a, b) = align strat x $ alignStack strat xs'
+
+polys :: [Sequence a] -> Sequence a
+polys = alignStack Repeat
+
+centres :: [Sequence a] -> Sequence a
+centres = alignStack Centre
+
+lefts :: [Sequence a] -> Sequence a
+lefts = alignStack JustifyLeft
+
+rights :: [Sequence a] -> Sequence a
+rights = alignStack JustifyRight
+
+truncs :: [Sequence a] -> Sequence a
+truncs = alignStack TruncateRepeat
+
+expands :: [Sequence a] -> Sequence a
+expands = alignStack Expand
