@@ -12,6 +12,7 @@ import           Data.Fixed          (mod')
 import           Data.List           (intercalate, intersperse)
 import           Data.Ratio
 import           Data.Tuple          (swap)
+-- import           Debug.Trace         (trace)
 import           Prelude             hiding ((*>), (<*))
 
 -- ********
@@ -33,32 +34,32 @@ lcmTime a b = lcm (f a) (f b) % d
         f x = numerator x * (d `div` denominator x)
 
 -- ***********************
--- | Arc (aka time span) *
+-- | Span (aka time arc) *
 -- ***********************
-data Arc = Arc { aBegin :: Time, aEnd :: Time}
+data Span = Span { aBegin :: Time, aEnd :: Time}
   deriving (Eq, Ord, Show)
 
 -- | Intersection of two arcs
-sect :: Arc -> Arc -> Arc
-sect (Arc b e) (Arc b' e') = Arc (max b b') (min e e')
+sect :: Span -> Span -> Span
+sect (Span b e) (Span b' e') = Span (max b b') (min e e')
 
 -- | Returns the whole cycle arc that the given time is in
-timeToCycle :: Time -> Arc
-timeToCycle t = Arc (sam t) (nextSam t)
+timeToCycle :: Time -> Span
+timeToCycle t = Span (sam t) (nextSam t)
 
 -- | Splits a timespan at cycle boundaries
-splitArcs :: Arc -> [Arc]
-splitArcs (Arc s e) | s == e = [Arc s e] -- support zero-width arcs
-                    | otherwise = splitArcs' (Arc s e) -- otherwise, recurse
-  where splitArcs' (Arc s' e') | e' <= s' = []
-                               | sam s' == sam e' = [Arc s' e']
+splitSpans :: Span -> [Span]
+splitSpans (Span s e) | s == e = [Span s e] -- support zero-width arcs
+                    | otherwise = splitSpans' (Span s e) -- otherwise, recurse
+  where splitSpans' (Span s' e') | e' <= s' = []
+                               | sam s' == sam e' = [Span s' e']
                                | otherwise
-          = Arc s' (nextSam s') : splitArcs' (Arc (nextSam s') e')
+          = Span s' (nextSam s') : splitSpans' (Span (nextSam s') e')
 
 -- | Similar to 'fmap' but time is relative to the cycle (i.e. the
 -- sam of the start of the arc)
-mapCycle :: (Time -> Time) -> Arc -> Arc
-mapCycle f (Arc s e) = Arc (sam' + f (s - sam')) (sam' + f (e - sam'))
+mapCycle :: (Time -> Time) -> Span -> Span
+mapCycle f (Span s e) = Span (sam' + f (s - sam')) (sam' + f (e - sam'))
          where sam' = sam s
 
 -- *********
@@ -68,7 +69,7 @@ mapCycle f (Arc s e) = Arc (sam' + f (s - sam')) (sam' + f (e - sam'))
 -- It might be a fragment of an event, in which case its 'active' arc
 -- will smaller than its 'whole'.
 
-data Event a = Event {whole :: Maybe Arc, active :: Arc, value :: a}
+data Event a = Event {whole :: Maybe Span, active :: Span, value :: a}
   deriving (Functor, Eq, Ord)
 
 instance (Show a) => Show (Event a) where
@@ -121,7 +122,7 @@ patternify_p_p_p f apat bpat cpat pat = apat `bindParameter` \a -> (bpat `bindPa
 -- A pattern that's a function from a timespan to events active during
 -- that timespan. A continuous signal, that can nonetheless contain
 -- discrete events.
-data Signal a = Signal {query :: Arc -> [Event a]}
+data Signal a = Signal {query :: Span -> [Event a]}
   deriving (Functor)
 
 instance Semigroup (Signal a) where a <> b = cat [a,b]
@@ -130,7 +131,7 @@ instance Monad Signal         where (>>=) = sigBindWith $ liftA2 sect
                                     return = pure
 -- Define applicative from monad
 instance Applicative Signal where
-  pure v = Signal $ \q -> map (\arc -> Event (Just $ timeToCycle $ aBegin arc) arc v) $ splitArcs q
+  pure v = Signal $ \q -> map (\arc -> Event (Just $ timeToCycle $ aBegin arc) arc v) $ splitSpans q
   pf <*> px = pf >>= \f -> px >>= \x -> pure $ f x
 
 instance Pattern Signal where
@@ -146,7 +147,7 @@ instance Pattern Signal where
   cat pats = splitQueries $ Signal $ \a -> query (_late (offset a) (pats !! mod (floor $ aBegin a) n)) a
     where offset arc = sam (aBegin arc) - sam (aBegin arc / toRational n)
           n = length pats
-  timeCat tps = stack $ map (\(s,e,p) -> _compressArc (Arc (s/total) (e/total)) p) $ arrange 0 tps
+  timeCat tps = stack $ map (\(s,e,p) -> _compressSpan (Span (s/total) (e/total)) p) $ arrange 0 tps
     where total = sum $ map fst tps
           arrange :: Time -> [(Time, Signal a)] -> [(Time, Time, Signal a)]
           arrange _ []            = []
@@ -158,7 +159,7 @@ instance Pattern Signal where
 -- makes other functions easier to define, as events that cross cycle
 -- boundaries don't need to be considered then.
 splitQueries :: Signal a -> Signal a
-splitQueries pat = Signal $ concatMap (query pat) . splitArcs
+splitQueries pat = Signal $ concatMap (query pat) . splitSpans
 
 (<*), (*>) :: Pattern p => p (t -> b) -> p t -> p b
 pf <* px = pf `innerBind` \f -> px `innerBind` \x -> pure $ f x
@@ -178,8 +179,8 @@ late = patternify _late
 fast = patternify _fast
 slow = patternify _slow
 
-withArcTime :: (Time -> Time) -> Arc -> Arc
-withArcTime timef (Arc b e) = Arc (timef b) (timef e)
+withSpanTime :: (Time -> Time) -> Span -> Span
+withSpanTime timef (Span b e) = Span (timef b) (timef e)
 
 -- | @withEvents f p@ returns a new @Signal@ with f applied to the
 -- resulting list of events for each query function @f@.
@@ -192,39 +193,39 @@ withEvent :: (Event a -> Event b) -> Signal a -> Signal b
 withEvent f = withEvents (map f)
 
 withEventTime :: (Time -> Time) -> Signal a -> Signal a
-withEventTime timef = withEvent $ \e -> e {active = withArcTime timef $ active e,
-                                           whole = withArcTime timef <$> whole e
+withEventTime timef = withEvent $ \e -> e {active = withSpanTime timef $ active e,
+                                           whole = withSpanTime timef <$> whole e
                                           }
 
-withEventArc :: (Arc -> Arc) -> Signal a -> Signal a
-withEventArc arcf = withEvent $ \e -> e {active = arcf $ active e,
+withEventSpan :: (Span -> Span) -> Signal a -> Signal a
+withEventSpan arcf = withEvent $ \e -> e {active = arcf $ active e,
                                          whole = arcf <$> whole e
                                         }
 
-withQuery :: (Arc -> Arc) -> Signal a -> Signal a
+withQuery :: (Span -> Span) -> Signal a -> Signal a
 withQuery arcf sig = Signal $ \arc -> query sig $ arcf arc
 
-withQueryMaybe :: (Arc -> Maybe Arc) -> Signal a -> Signal a
+withQueryMaybe :: (Span -> Maybe Span) -> Signal a -> Signal a
 withQueryMaybe qf pat = Signal $ \q -> fromMaybe [] $ qf q >>= Just . query pat
 
 withQueryTime :: (Time -> Time) -> Signal a -> Signal a
-withQueryTime timef = withQuery $ withArcTime timef
+withQueryTime timef = withQuery $ withSpanTime timef
 
 -- Makes a signal bind, given a function of how to calculate the 'whole' timespan
-sigBindWith :: (Maybe Arc -> Maybe Arc -> Maybe Arc) -> Signal a -> (a -> Signal b) -> Signal b
+sigBindWith :: (Maybe Span -> Maybe Span -> Maybe Span) -> Signal a -> (a -> Signal b) -> Signal b
 sigBindWith chooseWhole pv f = Signal $ \q -> concatMap match $ query pv q
   where match event = map (withWhole event) $ query (f $ value event) (active event)
         withWhole event event' = event' {whole = chooseWhole (whole event) (whole event')}
 
-_zoomArc :: Arc -> Signal a -> Signal a
-_zoomArc (Arc s e) p = splitQueries $ withEventArc (mapCycle ((/d) . subtract s)) $ withQuery (mapCycle ((+s) . (*d))) p
+_zoomSpan :: Span -> Signal a -> Signal a
+_zoomSpan (Span s e) p = splitQueries $ withEventSpan (mapCycle ((/d) . subtract s)) $ withQuery (mapCycle ((+s) . (*d))) p
      where d = e-s
 
 -- TODO - why is this function so long?
 _fastGap :: Time -> Signal a -> Signal a
 _fastGap factor pat = splitQueries $ withEvent ef $ withQueryMaybe qf pat
   -- A bit fiddly, to drop zero-width queries at the start of the next cycle
-  where qf (Arc b e) | bpos < 1 = Just $ Arc (cyc + bpos) (cyc + epos)
+  where qf (Span b e) | bpos < 1 = Just $ Span (cyc + bpos) (cyc + epos)
                      | otherwise = Nothing
           where cyc = sam b
                 bpos = min 1 $ (b - cyc) * factor
@@ -234,22 +235,22 @@ _fastGap factor pat = splitQueries $ withEvent ef $ withQueryMaybe qf pat
           where a = active ev
                 b = aBegin a
                 e = aEnd a
-                a' = Arc (cyc + bpos) (cyc + epos)
+                a' = Span (cyc + bpos) (cyc + epos)
                   where cyc = sam b
                         bpos = min 1 $ (b - cyc) / factor
                         epos = min 1 $ (e - cyc) / factor
                 w' = do w <- whole ev
                         let b' = aBegin a' - ((b - aBegin w) / factor)
                             e' = aEnd a' + ((aEnd w - e) / factor)
-                        return $ Arc b' e'
+                        return $ Span b' e'
 
-_compressArc :: Arc -> Signal a -> Signal a
-_compressArc (Arc b e) pat | b > e || b > 1 || e > 1 || b < 0 || e < 0 = silence
+_compressSpan :: Span -> Signal a -> Signal a
+_compressSpan (Span b e) pat | b > e || b > 1 || e > 1 || b < 0 || e < 0 = silence
                            | otherwise = _late b $ _fastGap (1/(e-b)) pat
 
 -- | Similar to @fastCat@, but each signal is given a relative duration
 sigTimeCat :: [(Time, Signal a)] -> Signal a
-sigTimeCat tps = stack $ map (\(s,e,p) -> _compressArc (Arc (s/total) (e/total)) p) $ arrange 0 tps
+sigTimeCat tps = stack $ map (\(s,e,p) -> _compressSpan (Span (s/total) (e/total)) p) $ arrange 0 tps
     where total = sum $ map fst tps
           arrange :: Time -> [(Time, Signal a)] -> [(Time, Time, Signal a)]
           arrange _ []            = []
@@ -320,6 +321,17 @@ seqJoinWith _ (Atom d i o Nothing)    = Atom d i o Nothing
 seqJoinWith f (Cat xs)                = Cat $ map (seqJoinWith f) xs
 seqJoinWith f (Stack xs)              = Stack $ map (seqJoinWith f) xs
 
+seqJoinWithSpan :: (Span -> Time -> Sequence a -> Sequence a) -> Sequence (Sequence a) -> Sequence a
+seqJoinWithSpan f pat = loop 0 pat
+  where patd = duration pat
+        -- Pass d rather than d + i + o ?
+        loop pos (Atom d i o (Just seq)) = f (Span (pos/patd) ((pos + d)/patd)) d seq
+        loop pos (Atom d i o Nothing)    = Atom d i o Nothing
+        loop pos (Cat xs)                = Cat $ loop' pos xs
+          where loop' pos []     = []
+                loop' pos (x:xs) = (loop pos x):(loop' (pos + duration x) xs)
+        loop pos (Stack xs)              = Stack $ map (loop pos) xs
+
 -- Flatten, using outer duration as relative duration for inner
 seqJoin :: Sequence (Sequence a) -> Sequence a
 seqJoin = seqJoinWith _slow
@@ -331,6 +343,11 @@ seqOuterJoin = seqJoinWith (\t seq -> _fast (duration seq / t) seq)
 -- Flatten, repeating inner to total duration of outer
 seqInnerJoin :: Sequence (Sequence a) -> Sequence a
 seqInnerJoin = seqJoinWith seqTakeLoop
+
+seqInsideJoin :: Sequence (Sequence a) -> Sequence a
+seqInsideJoin seq = seqJoinWithSpan f seq
+  where f (Span b e) d seq = seqTakeLoop ((e-b)*d') $ seqDrop (b*d') seq
+          where d' = duration seq
 
 seqTakeLoop :: Time -> Sequence a -> Sequence a
 seqTakeLoop 0 _ = gap 0
@@ -348,7 +365,8 @@ seqTakeLoop t (Cat ss) = Cat $ loop t $ cycle ss
 
 seqDrop :: Time -> Sequence a -> Sequence a
 seqDrop 0 s = s
-seqDrop t s | duration s > t = seqDrop' (duration s `mod'` t) s
+-- The mod makes this 'safe' but is probably a bad idea..
+seqDrop t s | t > duration s = seqDrop' (t `mod'` duration s) s
             | otherwise = seqDrop' t s
   where seqDrop' :: Time -> Sequence a -> Sequence a
         seqDrop' t (Atom d i o v) | t == d = gap 0
@@ -392,6 +410,7 @@ instance Pattern Sequence where
   withTime f _ pat = withAtomTime f pat
   cat = Cat   -- TODO - shallow cat?
   stack = expands
+  -- duration of 'part', not whole
   duration (Atom d _ _ _) = d
   duration (Cat xs)       = sum $ map duration xs
   duration (Stack [])     = 0
@@ -405,7 +424,7 @@ instance Pattern Sequence where
     where
       -- One sequence per cycle
       toSignal' (Atom d i o (Just v)) | d == 0 = error "whoops"
-                                          | otherwise = _zoomArc (Arc (i/t) (1-(o/t))) $ pure v
+                                      | otherwise = _zoomSpan (Span (i/t) (1-(o/t))) $ pure v
         where t = d + i + o
       toSignal' (Atom _ _ _ Nothing) = silence
       toSignal' (Cat xs) = timeCat timeseqs
