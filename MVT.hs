@@ -12,7 +12,7 @@ import           Data.Fixed          (mod')
 import           Data.List           (intercalate, intersperse)
 import           Data.Ratio
 import           Data.Tuple          (swap)
--- import           Debug.Trace         (trace)
+import           Debug.Trace         (trace)
 import           Prelude             hiding ((*>), (<*))
 
 -- ********
@@ -20,6 +20,7 @@ import           Prelude             hiding ((*>), (<*))
 -- ********
 type Time = Rational
 
+-- | The start of the cycle
 sam :: Time -> Time
 sam s = toRational (floor s :: Int)
 
@@ -50,11 +51,10 @@ timeToCycle t = Span (sam t) (nextSam t)
 -- | Splits a timespan at cycle boundaries
 splitSpans :: Span -> [Span]
 splitSpans (Span s e) | s == e = [Span s e] -- support zero-width arcs
-                    | otherwise = splitSpans' (Span s e) -- otherwise, recurse
+                      | otherwise = splitSpans' (Span s e) -- otherwise, recurse
   where splitSpans' (Span s' e') | e' <= s' = []
-                               | sam s' == sam e' = [Span s' e']
-                               | otherwise
-          = Span s' (nextSam s') : splitSpans' (Span (nextSam s') e')
+                                 | sam s' == sam e' = [Span s' e']
+                                 | otherwise = Span s' (nextSam s') : splitSpans' (Span (nextSam s') e')
 
 -- | Similar to 'fmap' but time is relative to the cycle (i.e. the
 -- sam of the start of the arc)
@@ -82,11 +82,11 @@ eventWithSpan f e = e {active = f $ active e,
 -- | Pattern *
 -- ***********
 -- A type class for patterns
+
 class (Functor p, Applicative p, Monad p) => Pattern p where
   duration :: p a -> Time
   withTime :: (Time -> Time) -> (Time -> Time) -> p a -> p a
   innerBind, outerBind :: p a -> (a -> p b) -> p b
-  bindParameter :: p a -> (a -> p b) -> p b
   cat :: [p a] -> p a
   timeCat :: [(Time, p a)] -> p a
   stack :: [p a] -> p a
@@ -107,19 +107,19 @@ outerJoin s = outerBind s id
 
 -- patternify the first parameter
 patternify :: Pattern p => (a -> b -> p c) -> p a -> b -> p c
-patternify f apat pat                 = apat `bindParameter` \a -> f a pat
+patternify f apat pat                 = apat `innerBind` \a -> f a pat
 
 -- patternify the first two parameters
 patternify_p_p :: (Pattern p) => (a -> b -> c -> p d) -> p a -> p b -> c -> p d
-patternify_p_p f apat bpat pat        = apat `bindParameter` \a -> (bpat `bindParameter` \b -> f a b pat)
+patternify_p_p f apat bpat pat        = apat `innerBind` \a -> (bpat `innerBind` \b -> f a b pat)
 
 -- patternify the first but not the second parameters
 patternify_p_n :: Pattern p => (a -> b -> c -> p d) -> p a -> b -> c -> p d
-patternify_p_n f apat b pat           = apat `bindParameter` \a -> f a b pat
+patternify_p_n f apat b pat           = apat `innerBind` \a -> f a b pat
 
 -- patternify the first three parameters
 patternify_p_p_p :: Pattern p => (a -> b -> c -> d -> p e) -> p a -> p b -> p c -> d -> p e
-patternify_p_p_p f apat bpat cpat pat = apat `bindParameter` \a -> (bpat `bindParameter` \b -> (cpat `bindParameter` \c -> f a b c pat))
+patternify_p_p_p f apat bpat cpat pat = apat `innerBind` \a -> (bpat `innerBind` \b -> (cpat `innerBind` \c -> f a b c pat))
 
 -- **********
 -- | Signal *
@@ -147,18 +147,17 @@ instance Pattern Signal where
   -- | Alternative binds
   innerBind = sigBindWith $ flip const
   outerBind = sigBindWith const
-  bindParameter = innerBind
   -- | Concatenate a list of signals, interleaving cycles.
-  cat pats = splitQueries $ Signal $ \a -> query (_late (offset a) (pats !! mod (floor $ aBegin a) n)) a
-    where offset arc = sam (aBegin arc) - sam (aBegin arc / toRational n)
-          n = length pats
+  cat pats = splitQueries $ trace "hmm" $ Signal $ \a -> query (_late (offset a) (pats !! mod (floor $ aBegin a) n)) (trace (show $ a) a)
+    where offset arc = sam (aBegin arc) - sam (aBegin arc / toRational (trace (show n) $ n))
+          n = length $ trace (show $ length pats) $ pats
   timeCat tps = stack $ map (\(s,e,p) -> _compressSpan (Span (s/total) (e/total)) p) $ arrange 0 tps
     where total = sum $ map fst tps
           arrange :: Time -> [(Time, Signal a)] -> [(Time, Time, Signal a)]
           arrange _ []            = []
           arrange t ((t',p):tps') = (t,t+t',p) : arrange (t+t') tps'
   stack pats = Signal $ \a -> concatMap (`query` a) pats
-  _early t = withTime (+ t) (subtract t)
+  _early t = withTime (subtract t) (+ t)
   rev pat = splitQueries $ Signal f
     where f a = eventWithSpan reflect <$> (query pat $ reflect a)
             where cyc = sam $ aBegin a
@@ -180,7 +179,7 @@ infixl 4 <*, *>
 _fast, _slow, _late :: Pattern p => Time -> p a -> p a
 _fast t = withTime (/ t) (* t)
 _slow t = withTime (* t) (/ t)
-_late = _early . (1 /)
+_late = _early . (0-)
 
 -- patternify parameters
 fast, slow, early, late :: Pattern p => p Time -> p a -> p a
@@ -434,7 +433,6 @@ instance Pattern Sequence where
   timeCat seqs = seqJoin $ Cat $ map (uncurry step) seqs
   seqv `outerBind` f = seqOuterJoin $ fmap f seqv
   seqv `innerBind` f = seqInnerJoin $ fmap f seqv
-  bindParameter = (innerBind)
   _early t = (\(a, b) -> cat [a,b]) . seqSplitAt t
   rev (Stack xs) = Stack $ map rev xs
   rev (Cat xs)   = withAtom swapio $ Cat $ reverse $ map rev xs
