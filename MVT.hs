@@ -67,14 +67,17 @@ mapCycle f (Span s e) = Span (sam' + f (s - sam')) (sam' + f (e - sam'))
 -- *********
 -- A discrete value with a whole timespan, or a continuous one without
 -- It might be a fragment of an event, in which case its 'active' arc
--- will smaller than its 'whole'.
-
+-- will be a smaller subsection of its 'whole'.
 data Event a = Event {whole :: Maybe Span, active :: Span, value :: a}
   deriving (Functor, Eq, Ord)
 
 instance (Show a) => Show (Event a) where
   show e = show (whole e) ++ " " ++ show (active e) ++ " " ++ show (value e)
 
+eventWithSpan :: (Span -> Span) -> Event a -> Event a
+eventWithSpan f e = e {active = f $ active e,
+                       whole  = f <$> whole e
+                      }
 -- ***********
 -- | Pattern *
 -- ***********
@@ -87,6 +90,8 @@ class (Functor p, Applicative p, Monad p) => Pattern p where
   cat :: [p a] -> p a
   timeCat :: [(Time, p a)] -> p a
   stack :: [p a] -> p a
+  _early :: Time -> p a -> p a
+  rev :: p a -> p a
   toSignal :: p a -> Signal a
 
 silence :: (Monoid (p a), Pattern p) => p a
@@ -153,6 +158,12 @@ instance Pattern Signal where
           arrange _ []            = []
           arrange t ((t',p):tps') = (t,t+t',p) : arrange (t+t') tps'
   stack pats = Signal $ \a -> concatMap (`query` a) pats
+  _early t = withTime (+ t) (subtract t)
+  rev pat = splitQueries $ Signal f
+    where f a = eventWithSpan reflect <$> (query pat $ reflect a)
+            where cyc = sam $ aBegin a
+                  next_cyc = nextSam cyc
+                  reflect (Span b e) = Span (cyc + (next_cyc - e)) (cyc + (next_cyc - b))
   toSignal = id
 
 -- | Split queries at sample boundaries. An internal function that
@@ -166,18 +177,17 @@ pf <* px = pf `innerBind` \f -> px `innerBind` \x -> pure $ f x
 pf *> px = pf `outerBind` \f -> px `outerBind` \x -> pure $ f x
 infixl 4 <*, *>
 
--- TODO - early/late don't work for sequences - define on instances
-_early, _late, _fast, _slow :: Pattern p => Time -> p a -> p a
-_early t = withTime (subtract t) (+ t)
-_late t = withTime (+ t) (subtract t)
+_fast, _slow, _late :: Pattern p => Time -> p a -> p a
 _fast t = withTime (/ t) (* t)
 _slow t = withTime (* t) (/ t)
+_late = _early . (1 /)
 
-early, late, fast, slow :: Pattern p => p Time -> p a -> p a
+-- patternify parameters
+fast, slow, early, late :: Pattern p => p Time -> p a -> p a
+fast  = patternify _fast
+slow  = patternify _slow
 early = patternify _early
-late = patternify _late
-fast = patternify _fast
-slow = patternify _slow
+late  = patternify _late
 
 withSpanTime :: (Time -> Time) -> Span -> Span
 withSpanTime timef (Span b e) = Span (timef b) (timef e)
@@ -199,8 +209,8 @@ withEventTime timef = withEvent $ \e -> e {active = withSpanTime timef $ active 
 
 withEventSpan :: (Span -> Span) -> Signal a -> Signal a
 withEventSpan arcf = withEvent $ \e -> e {active = arcf $ active e,
-                                         whole = arcf <$> whole e
-                                        }
+                                          whole = arcf <$> whole e
+                                         }
 
 withQuery :: (Span -> Span) -> Signal a -> Signal a
 withQuery arcf sig = Signal $ \arc -> query sig $ arcf arc
@@ -337,17 +347,23 @@ seqJoin :: Sequence (Sequence a) -> Sequence a
 seqJoin = seqJoinWith _slow
 
 -- Flatten, expanding inner to outer duration
-seqOuterJoin :: Sequence (Sequence a) -> Sequence a
-seqOuterJoin = seqJoinWith (\t seq -> _fast (duration seq / t) seq)
+seqExpandJoin :: Sequence (Sequence a) -> Sequence a
+seqExpandJoin = seqJoinWith (\t seq -> _fast (duration seq / t) seq)
 
 -- Flatten, repeating inner to total duration of outer
-seqInnerJoin :: Sequence (Sequence a) -> Sequence a
-seqInnerJoin = seqJoinWith seqTakeLoop
+seqLoopJoin :: Sequence (Sequence a) -> Sequence a
+seqLoopJoin = seqJoinWith seqTakeLoop
 
-seqInsideJoin :: Sequence (Sequence a) -> Sequence a
-seqInsideJoin seq = seqJoinWithSpan f seq
+-- Flatten, changing duration of outer to fit inner
+seqInnerJoin :: Sequence (Sequence a) -> Sequence a
+seqInnerJoin seq = seqJoinWithSpan f seq
   where f (Span b e) d seq = seqTakeLoop ((e-b)*d') $ seqDrop (b*d') seq
           where d' = duration seq
+
+-- Flatten, changing duration of inner to fit outer
+seqOuterJoin :: Sequence (Sequence a) -> Sequence a
+seqOuterJoin seq = _fast (duration inner / duration seq) inner
+  where inner = seqInnerJoin seq
 
 seqTakeLoop :: Time -> Sequence a -> Sequence a
 seqTakeLoop 0 _ = gap 0
@@ -418,7 +434,13 @@ instance Pattern Sequence where
   timeCat seqs = seqJoin $ Cat $ map (uncurry step) seqs
   seqv `outerBind` f = seqOuterJoin $ fmap f seqv
   seqv `innerBind` f = seqInnerJoin $ fmap f seqv
-  bindParameter = (>>=)
+  bindParameter = (innerBind)
+  _early t = (\(a, b) -> cat [a,b]) . seqSplitAt t
+  rev (Stack xs) = Stack $ map rev xs
+  rev (Cat xs)   = withAtom swapio $ Cat $ reverse $ map rev xs
+    where swapio (Atom d i o v) = Atom d o i v
+          swapio x              = x -- shouldn't happen
+  rev x          = x
   -- One beat per cycle..
   toSignal pat = _slow (duration pat) $ toSignal' pat
     where
@@ -431,7 +453,7 @@ instance Pattern Sequence where
         where timeseqs = map (\x -> (duration x, toSignal' x)) xs
       toSignal' (Stack xs) = stack $ map toSignal' xs
 
--- **********************
+  -- **********************
 -- | Sequence alignment *
 -- **********************
 
