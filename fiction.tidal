@@ -1,0 +1,37 @@
+
+phrases = (`append` "dim ~") <$> ["tha dhi gi na thom", "ta ka di na", "ta ki ta", "ta ka" "ta" ""]
+
+-- look a lot like arpeggios
+
+phrase phrases "5 .. 0 0 .. 5 5 .. 0"
+move phrases "down up down"
+
+phrase phrases "0 .. 5 5 .. 0 0 .. 5"
+move phrases "up down up"
+
+phrase phrases "0 5 1 4 2 3 3 2 4 1 5 0"
+move phrases $ cat [converge, disperse]
+
+phrase phrases "5 0 4 1 3 2 2 3 1 4 0 5"
+move phrases $ cat [convergeWith "1 0", disperseWith "0 1"]
+
+phrase phrases "0 5 0 . 1 4 1 . 2 3 2 . 3 2 3 . 4 1 4 . 5 0 5"
+move phrases $ cat [convergeWith "0 1 0", disperseWith "1 0 1"]
+
+phrase phrases "5 0 5 4 1 4 3 2 3 2 3 2 1 4 1 0 5 0"
+move phrases $ cat [convergeWith "1 0 1", disperseWith "0 1 0"]
+
+-- Teermanas
+
+(tha...)(....)(dim...)(....)(gi...)(na...)(tho...)
+(tha...)(..dim.)(....)(gi..na)(..tho.)(.
+tha..)(.dim..)(.gi.na)(.tho.
+tha)(.dim.gi)(nathotha.)(dim.gina)(thota.dim)(.ginatho)
+
+place "tha ~ dim ~ gi na tho" $ beats "4 3 2 1 1 1"
+
+or
+
+slowSqueeze "4 3 2 1 1 1" "tha ~ dim ~ gi na tho"
+
+slow (squeeze "4 3 2 1 1 1") "tha ~ dim ~ gi na tho"
