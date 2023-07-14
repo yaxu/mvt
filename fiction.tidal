@@ -35,3 +35,5 @@ or
 slowSqueeze "4 3 2 1 1 1" "tha ~ dim ~ gi na tho"
 
 slow (squeeze "4 3 2 1 1 1") "tha ~ dim ~ gi na tho"
+
+
