@@ -105,13 +105,6 @@ outerJoin s = outerBind s id
 
 -- Turns functions with non-patterned parameters into fully patternified ones
 
-alignify :: Alignment x => (a -> b -> Sequence c) -> x a -> b -> Sequence c
-alignify f alignSeq seqb = aseq `aBind` \a -> f a seqb
-  where aseq = aSequence alignSeq
-        strat = aStrategy alignSeq
-        -- TODO choose different binds based on strategy.
-        aBind = innerBind
-
 -- patternify the first parameter
 patternify :: Pattern p => (a -> b -> p c) -> p a -> b -> p c
 patternify f apat pat                 = apat `innerBind` \a -> f a pat
@@ -127,6 +120,15 @@ patternify_p_n f apat b pat           = apat `innerBind` \a -> f a b pat
 -- patternify the first three parameters
 patternify_p_p_p :: Pattern p => (a -> b -> c -> d -> p e) -> p a -> p b -> p c -> d -> p e
 patternify_p_p_p f apat bpat cpat pat = apat `innerBind` \a -> (bpat `innerBind` \b -> (cpat `innerBind` \c -> f a b c pat))
+
+-- new approach - allows strategy and bind to be set per parameter
+alignify :: Alignment x => (a -> Sequence b -> Sequence c) -> x a -> Sequence b -> Sequence c
+alignify f alignSeq seqb = seqa' `aBind` \a -> f a seqb'
+  where SeqStrategy strat dir seqa = toSeqStrategy alignSeq
+        (seqa', seqb') = align strat seqa seqb
+        aBind | dir == Inner = innerBind
+              | dir == Outer = outerBind
+              | otherwise = (>>=)
 
 -- **********
 -- | Signal *
@@ -189,11 +191,18 @@ _slow t = withTime (* t) (/ t)
 _late = _early . (0-)
 
 -- patternify parameters
-fast, slow, early, late :: Pattern p => p Time -> p a -> p a
-fast  = patternify _fast
-slow  = patternify _slow
-early = patternify _early
-late  = patternify _late
+-- fast, slow, early, late :: Pattern p => p Time -> p a -> p a
+-- fast  = patternify _fast
+-- slow  = patternify _slow
+-- early = patternify _early
+-- late  = patternify _late
+
+-- alignify parameters
+fast, slow, early, late :: Alignment x => x Time -> Sequence a -> Sequence a
+fast  = alignify _fast
+slow  = alignify _slow
+early = alignify _early
+late  = alignify _late
 
 withSpanTime :: (Time -> Time) -> Span -> Span
 withSpanTime timef (Span b e) = Span (timef b) (timef e)
@@ -477,20 +486,36 @@ data Strategy = JustifyLeft
               deriving (Eq, Ord, Show)
 
 class Alignment a where
-  aSequence :: a b -> Sequence b
-  aStrategy :: a b -> Strategy
+  toSeqStrategy :: a b -> SeqStrategy b
 
 instance Alignment Sequence where
-  aSequence a = a
-  aStrategy _ = Expand -- default strategy
+  -- default strategy and direction
+  toSeqStrategy a = SeqStrategy Expand Inner a
 
 data SeqStrategy a = SeqStrategy {sStrategy :: Strategy,
+                                  sDirection :: Direction,
                                   sSequence :: Sequence a
                                  }
 
 instance Alignment SeqStrategy where
-  aSequence = sSequence
-  aStrategy = sStrategy
+  toSeqStrategy = id
+
+setStrategy :: Alignment x => Strategy -> x a -> SeqStrategy a
+setStrategy strat a = (toSeqStrategy a) {sStrategy = strat}
+
+justifyleft, justifyright, justifyboth, expand, truncateleft, truncateright, truncaterepeat, rep, centre, squeezein, squeezeout :: Alignment x => x a -> SeqStrategy a
+justifyleft    = setStrategy JustifyLeft
+justifyright   = setStrategy JustifyRight
+justifyboth    = setStrategy JustifyBoth
+expand         = setStrategy Expand
+truncateleft   = setStrategy TruncateLeft
+truncateright  = setStrategy TruncateRight
+truncaterepeat = setStrategy TruncateRepeat
+-- repeat is already taken by prelude
+rep            = setStrategy Repeat
+centre         = setStrategy Centre
+squeezein      = setStrategy SqueezeIn
+squeezeout     = setStrategy SqueezeOut
 
 seqPadBy :: ([Sequence a] -> Sequence a -> [Sequence a]) -> Time -> Sequence a -> Sequence a
 seqPadBy by t x = f x
