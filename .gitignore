@@ -1,23 +1,30 @@
+# -*- mode: gitignore; -*-
+
+.cabal-sandbox
+cabal.sandbox.config
 dist
-dist-*
-cabal-dev
+dist-newstyle
+cabal
 *.o
 *.hi
-*.hie
-*.chi
-*.chs.h
-*.dyn_o
 *.dyn_hi
-.hpc
-.hsenv
-.cabal-sandbox/
-cabal.sandbox.config
-*.prof
-*.aux
-*.hp
-*.eventlog
-.stack-work/
-cabal.project.local
-cabal.project.local~
-.HTF/
+*.dyn_o
+.stack-work
+.DS_Store
 .ghc.environment.*
+out/
+.idea/
+*.lock
+*.iml
+*.swp
+.vscode/
+
+# text editor temp files
+*~
+\#*\#
+.\#*
+
+# Allow flake.lock for reproducible builds
+!flake.lock
+# Ignore nix generated `result` symlink
+result
