@@ -105,6 +105,13 @@ outerJoin s = outerBind s id
 
 -- Turns functions with non-patterned parameters into fully patternified ones
 
+alignify :: Alignment x => (a -> b -> Sequence c) -> x a -> b -> Sequence c
+alignify f alignSeq seqb = aseq `aBind` \a -> f a seqb
+  where aseq = aSequence alignSeq
+        strat = aStrategy alignSeq
+        -- TODO choose different binds based on strategy.
+        aBind = innerBind
+
 -- patternify the first parameter
 patternify :: Pattern p => (a -> b -> p c) -> p a -> b -> p c
 patternify f apat pat                 = apat `innerBind` \a -> f a pat
@@ -235,7 +242,7 @@ _fastGap :: Time -> Signal a -> Signal a
 _fastGap factor pat = splitQueries $ withEvent ef $ withQueryMaybe qf pat
   -- A bit fiddly, to drop zero-width queries at the start of the next cycle
   where qf (Span b e) | bpos < 1 = Just $ Span (cyc + bpos) (cyc + epos)
-                     | otherwise = Nothing
+                      | otherwise = Nothing
           where cyc = sam b
                 bpos = min 1 $ (b - cyc) * factor
                 epos = min 1 $ (e - cyc) * factor
@@ -468,6 +475,22 @@ data Strategy = JustifyLeft
               | SqueezeIn
               | SqueezeOut
               deriving (Eq, Ord, Show)
+
+class Alignment a where
+  aSequence :: a b -> Sequence b
+  aStrategy :: a b -> Strategy
+
+instance Alignment Sequence where
+  aSequence a = a
+  aStrategy _ = Expand -- default strategy
+
+data SeqStrategy a = SeqStrategy {sStrategy :: Strategy,
+                                  sSequence :: Sequence a
+                                 }
+
+instance Alignment SeqStrategy where
+  aSequence = sSequence
+  aStrategy = sStrategy
 
 seqPadBy :: ([Sequence a] -> Sequence a -> [Sequence a]) -> Time -> Sequence a -> Sequence a
 seqPadBy by t x = f x
