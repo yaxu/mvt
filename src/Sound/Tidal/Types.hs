@@ -1,6 +1,8 @@
-{-# LANGUAGE DeriveFunctor #-}
+{-# LANGUAGE DeriveFunctor, DeriveGeneric #-}
 
 module Sound.Tidal.Types where
+
+import           GHC.Generics
 
 type Time = Rational
 
@@ -19,10 +21,22 @@ class (Functor p, Applicative p, Monad p) => Pattern p where
 data Span = Span { aBegin :: Time, aEnd :: Time}
   deriving (Eq, Ord, Show)
 
+
+-- | Metadata - currently just used for sourcecode positions that
+-- caused the event they're stored against
+data Metadata = Metadata {metaSrcPos   :: [((Int, Int), (Int, Int))],
+                          metaStrategy :: Maybe Strategy
+                         }
+  deriving (Eq, Ord, Show)
+
+
 -- A discrete value with a whole timespan, or a continuous one without
 -- It might be a fragment of an event, in which case its 'active' arc
 -- will be a smaller subsection of its 'whole'.
-data Event a = Event {whole :: Maybe Span, active :: Span, value :: a}
+data Event a = Event {whole :: Maybe Span,
+                      active :: Span,
+                      value :: a
+                     }
   deriving (Functor, Eq, Ord)
 
 -- A pattern that's a function from a timespan to events active during
@@ -34,8 +48,12 @@ data Signal a = Signal {query :: Span -> [Event a]}
 -- A pattern as a discrete, contiguous, finite sequence, that's
 -- structured to support polyphonic stacks, and embedded subsequences
 data Sequence a = Atom {atomDuration :: Time,
-                        atomInset    :: Time,
+                        -- If the atom is a fragment, the 'original'
+                        -- duration that it's a fragment of is
+                        -- duration + inset + outset.
+                        atomInset    :: Time, 
                         atomOutset   :: Time,
+                        -- A 'gap' or silence is an atom without a value
                         atomValue    :: Maybe a
                        }
                 | Cat [Sequence a]
@@ -56,17 +74,19 @@ data Strategy = JustifyLeft
               | SqueezeOut
               deriving (Eq, Ord, Show)
 
-class Alignment a where
-  toSeqStrategy :: a b -> SeqStrategy b
-
-
-data SeqStrategy a = SeqStrategy {sStrategy  :: Strategy,
-                                  sDirection :: Direction,
-                                  sSequence  :: Sequence a
-                                 }
-
 -- | Once we've aligned two patterns, where does the structure come from?
 data Direction = Inner
                | Outer
                | Mix
                deriving (Eq, Ord, Show)
+
+class Alignment a where
+  toSeqStrategy :: a b -> SeqStrategy b
+
+-- A wrapper for a sequence that specifies how it should be combined
+-- with another sequence.
+data SeqStrategy a = SeqStrategy {sStrategy  :: Strategy,
+                                  sDirection :: Direction,
+                                  sSequence  :: Sequence a
+                                 }
+

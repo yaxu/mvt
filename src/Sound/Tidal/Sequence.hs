@@ -43,7 +43,7 @@ instance (Show a) => Show (Sequence a) where
     where showio | i == 0 && o == 0 = ""
                  | otherwise = "(" ++ prettyRatio i ++ "," ++ prettyRatio o ++ ")"
   show (Cat xs) = "[" ++ unwords (map show xs) ++ "]"
-  show (Stack xs) = "[" ++ intercalate ", " (map show xs) ++ "]"
+  show (Stack xs) = "[\n" ++ intercalate ", \n" (map show xs) ++ "\n]"
 
 gap :: Time -> Sequence a
 gap t = Atom t 0 0 Nothing
@@ -213,6 +213,9 @@ instance Alignment SeqStrategy where
 
 setStrategy :: Alignment x => Strategy -> x a -> SeqStrategy a
 setStrategy strat a = (toSeqStrategy a) {sStrategy = strat}
+
+setDirection :: Alignment x => Direction -> x a -> SeqStrategy a
+setDirection dir a = (toSeqStrategy a) {sDirection = dir}
 
 justifyleft, justifyright, justifyboth, expand, truncateleft, truncateright, truncaterepeat, rep, centre, squeezein, squeezeout :: Alignment x => x a -> SeqStrategy a
 justifyleft    = setStrategy JustifyLeft

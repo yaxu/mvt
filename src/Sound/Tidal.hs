@@ -1,6 +1,7 @@
 module Sound.Tidal (module T) where
 
 import           Sound.Tidal.Event    as T
+import           Sound.Tidal.Metadata as T
 import           Sound.Tidal.Pattern  as T
 import           Sound.Tidal.Sequence as T
 import           Sound.Tidal.Signal   as T
