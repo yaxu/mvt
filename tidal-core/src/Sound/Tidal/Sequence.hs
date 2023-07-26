@@ -74,21 +74,21 @@ normalise (Stack xs) = listToStack $ loop xs
 normalise x = x
 
 seqJoinWith :: (Time -> Sequence a -> Sequence a) -> Sequence (Sequence a) -> Sequence a
-seqJoinWith f (Atom d i o (Just seq)) = f (d + i + o) seq
-seqJoinWith _ (Atom d i o Nothing)    = Atom d i o Nothing
-seqJoinWith f (Cat xs)                = Cat $ map (seqJoinWith f) xs
-seqJoinWith f (Stack xs)              = Stack $ map (seqJoinWith f) xs
+seqJoinWith f (Atom d i o (Just s)) = f (d + i + o) s
+seqJoinWith _ (Atom d i o Nothing)  = Atom d i o Nothing
+seqJoinWith f (Cat xs)              = Cat $ map (seqJoinWith f) xs
+seqJoinWith f (Stack xs)            = Stack $ map (seqJoinWith f) xs
 
 seqJoinWithSpan :: (Span -> Time -> Sequence a -> Sequence a) -> Sequence (Sequence a) -> Sequence a
 seqJoinWithSpan f pat = loop 0 pat
   where patd = duration pat
         -- Pass d rather than d + i + o ?
-        loop pos (Atom d i o (Just seq)) = f (Span (pos/patd) ((pos + d)/patd)) d seq
-        loop pos (Atom d i o Nothing)    = Atom d i o Nothing
-        loop pos (Cat xs)                = Cat $ loop' pos xs
-          where loop' pos []     = []
-                loop' pos (x:xs) = (loop pos x):(loop' (pos + duration x) xs)
-        loop pos (Stack xs)              = Stack $ map (loop pos) xs
+        loop pos (Atom d _ _ (Just s)) = f (Span (pos/patd) ((pos + d)/patd)) d s
+        loop _ (Atom d i o Nothing)    = Atom d i o Nothing
+        loop pos (Stack xs)            = Stack $ map (loop pos) xs
+        loop pos (Cat xs)              = Cat $ loop' pos xs
+          where loop' _ []        = []
+                loop' pos' (x:xs') = (loop pos' x):(loop' (pos' + duration x) xs')
 
 -- Flatten, using outer duration as relative duration for inner
 seqJoin :: Sequence (Sequence a) -> Sequence a
@@ -96,7 +96,7 @@ seqJoin = seqJoinWith _slow
 
 -- Flatten, expanding inner to outer duration
 seqExpandJoin :: Sequence (Sequence a) -> Sequence a
-seqExpandJoin = seqJoinWith (\t seq -> _fast (duration seq / t) seq)
+seqExpandJoin = seqJoinWith (\t s -> _fast (duration s / t) s)
 
 -- Flatten, repeating inner to total duration of outer
 seqLoopJoin :: Sequence (Sequence a) -> Sequence a
@@ -104,14 +104,15 @@ seqLoopJoin = seqJoinWith seqTakeLoop
 
 -- Flatten, changing duration of outer to fit inner
 seqInnerJoin :: Sequence (Sequence a) -> Sequence a
-seqInnerJoin seq = seqJoinWithSpan f seq
-  where f (Span b e) d seq = seqTakeLoop ((e-b)*d') $ seqDrop (b*d') seq
-          where d' = duration seq
+seqInnerJoin pat = seqJoinWithSpan f pat
+  -- TODO: 'd' isn't used here..
+  where f (Span b e) {- d -} _ pat' = seqTakeLoop ((e-b)*d') $ seqDrop (b*d') pat'
+          where d' = duration pat'
 
 -- Flatten, changing duration of inner to fit outer
 seqOuterJoin :: Sequence (Sequence a) -> Sequence a
-seqOuterJoin seq = _fast (duration inner / duration seq) inner
-  where inner = seqInnerJoin seq
+seqOuterJoin pat = _fast (duration inner / duration pat) inner
+  where inner = seqInnerJoin pat
 
 seqTakeLoop :: Time -> Sequence a -> Sequence a
 seqTakeLoop 0 _ = gap 0
@@ -119,9 +120,10 @@ seqTakeLoop t pat@(Atom d i _ v) | t > d = seqTakeLoop t $ Cat $ repeat pat
                                  | otherwise = Atom t i (max 0 $ d - t) v
 seqTakeLoop t (Stack ss) = Stack $ map (seqTakeLoop t) ss
 -- TODO - raise an error?
-seqTakeLoop t (Cat []) = Cat []
+seqTakeLoop _ (Cat []) = Cat []
 seqTakeLoop t (Cat ss) = Cat $ loop t $ cycle ss
   where loop :: Time -> [Sequence a] -> [Sequence a]
+        loop _ [] = [] -- can't happen
         loop t' (s:ss') | t' <= 0 = []
                         | t' <= stepDur = [seqTakeLoop t' s]
                         | otherwise = seqTakeLoop stepDur s : loop (t' - stepDur) ss'
@@ -133,17 +135,17 @@ seqDrop 0 s = s
 seqDrop t s | t > duration s = seqDrop' (t `mod'` duration s) s
             | otherwise = seqDrop' t s
   where seqDrop' :: Time -> Sequence a -> Sequence a
-        seqDrop' t (Atom d i o v) | t == d = gap 0
-                                  | otherwise = Atom (d - t) (i + t) o v
-        seqDrop' t (Stack ss) = Stack $ map (seqDrop' t) ss
-        seqDrop' t (Cat ss) = Cat $ loop t ss
+        seqDrop' t' (Atom d i o v) | t' == d = gap 0
+                                   | otherwise = Atom (d - t') (i + t') o v
+        seqDrop' t' (Stack ss) = Stack $ map (seqDrop' t') ss
+        seqDrop' t' (Cat ss) = Cat $ loop t' ss
           where loop :: Time -> [Sequence a] -> [Sequence a]
                 loop _ []  = []
-                loop t' (s:ss') | t' <= 0 = []
-                                | t' == stepDur = ss'
-                                | t' <= stepDur = seqDrop' t' s : ss'
-                                | otherwise = loop (t' - stepDur) ss'
-                  where stepDur = duration s
+                loop t'' (s':ss') | t'' <= 0 = []
+                                  | t'' == stepDur = ss'
+                                  | t'' <= stepDur = seqDrop' t'' s' : ss'
+                                  | otherwise = loop (t'' - stepDur) ss'
+                  where stepDur = duration s'
 
 seqSplitAt :: Time -> Sequence a -> (Sequence a, Sequence a)
 seqSplitAt t s = (seqTakeLoop t s, seqDrop t s)
@@ -273,9 +275,9 @@ withLargest f a b | o == LT = (a, f b)
   where o = compare (duration a) (duration b)
 
 align :: Strategy -> Sequence a -> Sequence b -> (Sequence a, Sequence b)
-align Repeat a b = (rep a, rep b)
+align Repeat a b = (replic a, replic b)
   where d = lcmTime (duration a) (duration b)
-        rep x = seqReplicate (floor $ d / duration x) x
+        replic x = seqReplicate (floor $ d / duration x) x
         seqReplicate :: Int -> Sequence a -> Sequence a
         seqReplicate n (Cat xs) = Cat $ concat $ replicate n xs
         seqReplicate n x        = Cat $ replicate n x
