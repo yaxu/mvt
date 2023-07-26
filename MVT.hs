@@ -7,12 +7,12 @@ module MVT where
 
 import           Control.Applicative (liftA2)
 import           Data.Maybe          (fromMaybe)
--- So we can overload *> and <* as alternatives to <*>
 import           Data.Fixed          (mod')
 import           Data.List           (intercalate, intersperse)
 import           Data.Ratio
 import           Data.Tuple          (swap)
 import           Debug.Trace         (trace)
+-- So we can overload *> and <* as alternatives to <*>
 import           Prelude             hiding ((*>), (<*))
 
 -- ********
@@ -157,9 +157,9 @@ instance Pattern Signal where
   innerBind = sigBindWith $ flip const
   outerBind = sigBindWith const
   -- | Concatenate a list of signals, interleaving cycles.
-  cat pats = splitQueries $ trace "hmm" $ Signal $ \a -> query (_late (offset a) (pats !! mod (floor $ aBegin a) n)) (trace (show $ a) a)
-    where offset arc = sam (aBegin arc) - sam (aBegin arc / toRational (trace (show n) $ n))
-          n = length $ trace (show $ length pats) $ pats
+  cat pats = splitQueries $ Signal $ \a -> query (_late (offset a) (pats !! mod (floor $ aBegin a) n)) a
+    where offset arc = sam (aBegin arc) - sam (aBegin arc / toRational n)
+          n = length $ pats
   timeCat tps = stack $ map (\(s,e,p) -> _compressSpan (Span (s/total) (e/total)) p) $ arrange 0 tps
     where total = sum $ map fst tps
           arrange :: Time -> [(Time, Signal a)] -> [(Time, Time, Signal a)]
